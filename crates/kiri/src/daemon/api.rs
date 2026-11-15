@@ -2613,15 +2613,19 @@ pub(super) fn create_for(req: &Request, engine: &Engine, wsl_distro: Option<&str
     // Both are written into the container's /etc/hosts by the guest, so a
     // newline in either would add lines of its own.
     let extra_hosts = extra_hosts_from(&strings(&host["ExtraHosts"]).unwrap_or_default())?;
-    let mut warnings: Vec<&str> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     if seccomp_unconfined {
-        warnings.push(SECCOMP_UNCONFINED_WARNING);
+        warnings.push(SECCOMP_UNCONFINED_WARNING.to_owned());
     }
     // --ulimit, --sysctl, --device, --device-cgroup-rule, --group-add:
     // refused now with Docker's error rather than at start.
     let host_opts = super::hostopts::from_host(host);
     super::hostopts::guest_lines(&host_opts, network_mode == "host").map_err(Error::BadRequest)?;
     super::hostopts::check_device_requests(host).map_err(Error::BadRequest)?;
+    // --uts, --ipc, --runtime and the like refused; resource tuning Kiri
+    // doesn't apply dropped with a warning. Before mounts, which may
+    // create volumes.
+    warnings.extend(super::hostopts::check_unsupported(host).map_err(Error::BadRequest)?);
     let limits = super::engine::Limits { shm_size: host["ShmSize"].as_u64().unwrap_or(0), ..limits_from(host, super::engine::Limits::default())? };
     if let Some(s) = body["StopSignal"].as_str().filter(|s| !s.is_empty()) {
         parse_signal(s)?;
