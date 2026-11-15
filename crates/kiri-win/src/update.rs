@@ -293,7 +293,23 @@ pub fn restart_engine() -> io::Result<()> {
     if !out.status.success() {
         return Err(io::Error::other(first_line(&out.stderr, "the engine did not restart")));
     }
-    Ok(())
+    // Done only when the engine answers as this version: a restart that
+    // brought the old one back would ask again at the next check.
+    let began = Instant::now();
+    let mut last = None;
+    while began.elapsed() < Duration::from_secs(60) {
+        if let Some(v) = crate::client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| crate::client::kiri_version(&r.json()).map(str::to_owned)) {
+            if v == CURRENT {
+                return Ok(());
+            }
+            last = Some(v);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(io::Error::other(match last {
+        Some(v) => format!("the engine came back on {v}, not {CURRENT}"),
+        None => "the engine did not come back".to_owned(),
+    }))
 }
 
 /// Whether `msi` is a Kiri installer of the version `promised`, newer than
@@ -450,7 +466,15 @@ pub fn check_now(manual: bool) {
         if let Some(v) = crate::client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| crate::client::kiri_version(&r.json()).map(str::to_owned))
             && newer(CURRENT, &v)
         {
-            emit(json!({"type": "enginestale", "version": v}).to_string());
+            // An update went in and the engine in WSL still runs the old
+            // build: move it over now, rather than asking. The card shows
+            // only if that fails.
+            if manual {
+                emit(json!({"type": "enginestale", "version": v}).to_string());
+            } else {
+                crate::serve::log(&format!("update: the engine runs {v}, this Kiri is {CURRENT}; restarting it"));
+                restart_engine_now();
+            }
         }
         feed_check(manual);
     });
@@ -590,7 +614,15 @@ pub fn restart_engine_now() {
                 // The page's engine toast, as the Mac's.
                 emit(json!({"type": "enginerestarted", "version": CURRENT, "ms": began.elapsed().as_millis() as u64}).to_string());
             }
-            Err(e) => emit(notice("error", &trf("Could not restart the engine: {error}", &[("error", &e)]))),
+            Err(e) => {
+                crate::serve::log(&format!("engine: did not restart ({e})"));
+                emit(notice("error", &trf("Could not restart the engine: {error}", &[("error", &e)])));
+                if let Some(v) = crate::client::request("GET", "/version", None).ok().filter(|r| r.ok()).and_then(|r| crate::client::kiri_version(&r.json()).map(str::to_owned))
+                    && newer(CURRENT, &v)
+                {
+                    emit(json!({"type": "enginestale", "version": v}).to_string());
+                }
+            }
         }
         crate::engine::send(crate::engine::Cmd::Refresh);
     });
